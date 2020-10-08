@@ -37,6 +37,8 @@ export default class Main extends Vue {
   private showModal!: boolean;
   private ipfs!: IPFS;
 
+  private peers: Set<string> = new Set<string>();
+
   private isLobbyMaster: boolean = false;
   private isLoading: boolean = false;
   private ownMultiHash!: string;
@@ -101,8 +103,6 @@ export default class Main extends Vue {
       this.connectionAttempts += 1;
       await new Promise(r => setTimeout(r, 1000)); //Wait between attempts
     }
-
-    this.addListeningEvents(ipfs);
 
 
     //const myId = await this.ipfs.id();
@@ -175,15 +175,6 @@ export default class Main extends Vue {
     return success;
   }
 
-  addListeningEvents(ipfs: IPFS) {
-    ipfs.libp2p.on("peer:connect", (ipfsPeer: any) => {
-      console.log("Connected: ", ipfsPeer.id._idB58String);
-    });
-    ipfs.libp2p.on("peer:disconnect", async (ipfsPeer: any) => {
-      console.log("Disconnected: ", ipfsPeer.id._idB58String);
-    });
-  }
-
   /**
    * Here we try to connect to the peer using circuit relay.
    */
@@ -223,7 +214,7 @@ export default class Main extends Vue {
       if (connected) {
         this.openModal(ipfs, multiHash);
       }
-    }, 1000);
+    }, 2000);
   }
 
 
@@ -237,13 +228,6 @@ export default class Main extends Vue {
     const showModal = newRoute.meta && newRoute.meta.showModal;
     const isLobbyMaster = oldRoute && oldRoute.meta && oldRoute.meta.isLobbyMaster;
     const multiHash = newRoute.params.multiHash;
-    /*
-    if (!this.ipfs && !this.isConnectingToSwarm) {
-      this.isConnectingToSwarm = true; //Safeguard in case user changes the route too quickly while it's still connecting
-      this.ipfs = await this.connectToSwarm();
-      this.isConnectingToSwarm = false;
-    }
-    */
 
     //TODO: make sure the multihash is a valid ipfs address.
     if (showModal && !isLobbyMaster && this.ownMultiHash != multiHash) {

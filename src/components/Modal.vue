@@ -1,19 +1,30 @@
 <template>
   <div class="modal">
     <ion-header>
-      <ion-toolbar color="warning">
-        <ion-title>Modal</ion-title>
+      <ion-toolbar color="success">
+        <div class="Space" slot="start"></div>
+        <ion-icon name="create" v-if="isLobbyMaster" slot="start"></ion-icon>
+        <ion-input
+          :placeholder="lobbyData.title"
+          :v-model="lobbyData.title"
+          v-on:ionChange="lobbyTitleChanged"
+          slot="start"
+        ></ion-input>
 
         <ion-buttons slot="end">
           <ion-button @click="dismissModal">
-            <ion-icon name="undo"></ion-icon>Back
+            <ion-icon name="undo"></ion-icon>Close
           </ion-button>
         </ion-buttons>
         <div class="Space" slot="start"></div>
         <ion-icon name="logo-github" slot="start" size="large"></ion-icon>
       </ion-toolbar>
     </ion-header>
-    <ion-content ref="content" color="tertiary" :scrollEvents="true" class="CustomContent">
+    <ion-content ref="content" color="dark" :scrollEvents="true" class="CustomContent">
+      <div class="ProgressBarContainer">
+        <ion-progress-bar color="secondary" type="indeterminate" v-if="isLoading"></ion-progress-bar>
+      </div>
+      <div class="Lobby">
       <ion-grid>
         <ion-row class="ion-align-items-center">
           <ion-col  class="ion-align-self-center" size="6">
@@ -23,8 +34,18 @@
                   :key="isLobbyMaster"
                 />
           </ion-col>
+          <ion-col  class="ion-align-self-center">
+        <ion-list>
+          <ion-item
+            class="Peer"
+            v-for="peer in peers"
+            :key="peer"
+          ><ion-label>{{ peer.substring(0, 8) + "....." + peer.substring(38, 48) }}</ion-label></ion-item>
+        </ion-list>
+          </ion-col>
         </ion-row>
       </ion-grid>
+      </div>
     </ion-content>
   </div>
 </template>
@@ -44,8 +65,20 @@ import QRCodeComponent from "@/components/QRCodeComponent.vue";
 import IPFS from "ipfs";
 
 import {
-  Peer
+  Peer,
+  MasterMessage,
+  LobbyData
 } from "../types";
+
+import {
+  create
+} from "ionicons/icons";
+import { addIcons } from "ionicons";
+
+addIcons({
+  "ios-create": create.ios,
+  "md-create": create.md
+});
 
 @Component({
   components: {
@@ -68,12 +101,19 @@ export default class Modal extends Vue {
   private collectionName!: string;
   private peerCollectionName!: string;
   private peers: Set<string> = new Set<string>();
+  private lobbyInfo!: MasterMessage;
 
   /* AvionDB */
   private aviondb!: any;
   private collection!: any;
   private peerCollection!: any;
+  private hasEvents!: boolean;
+  private isLoading: boolean = true;
 
+  private lobbyData: LobbyData = {
+    title: "Lobby"
+  }
+  private lobbyId!: string;
 
   constructor() {
     super();
@@ -86,20 +126,33 @@ export default class Modal extends Vue {
     }
   }
 
+  async lobbyTitleChanged(ev: CustomEvent) {
+    this.lobbyData.title = ev.detail.value;
 
-  async startPublish(inDbAddr: any, collectionName: string) {
-    console.info( `startPublish(${inDbAddr} , ${collectionName})` );
+    if (this.isLobbyMaster) {
+      await this.collection.findOneAndUpdate(
+        {_id: this.lobbyId},
+        { $set: { title: this.lobbyData.title  } }
+      );
+    }
+  }
+
+  async startPublish(inDbAddr: any, collectionName: string, lobbyId: string) {
+    console.info( `startPublish(${inDbAddr} , ${collectionName}, ${lobbyId})` );
 
     this.publishInterval = setInterval(async () => {
       const id = await this.ipfs.id();
       console.info("broadcasting:");
-      await this.broadcastLobbyInfo(inDbAddr, collectionName);
+      await this.broadcastLobbyInfo(inDbAddr, collectionName, lobbyId);
     }, 5000);
   }
   
 
-  async broadcastLobbyInfo(dbAddr: string, collectionName: string) {
-    console.info( `broadcastLobbyInfo(${dbAddr} , ${collectionName})` );
+  async broadcastLobbyInfo(dbAddr: string, collectionName: string, lobbyId: string) {
+    console.info( `broadcastLobbyInfo(${dbAddr} , ${collectionName}, ${lobbyId})` );
+
+    const headHash = await this.collection.getHeadHash();
+    const peersHeadHash = await this.peerCollection.getHeadHash();
 
     await this.ipfs.pubsub.publish(
       this.multiHash,
@@ -107,25 +160,35 @@ export default class Modal extends Vue {
         JSON.stringify({
           dbAddr: dbAddr,
           collectionName: collectionName,
+          headHash: headHash,
+          peersHeadHash: peersHeadHash,
+          lobbyId: lobbyId
         })
       )
     );
   }
 
   async startRefreshing() {
+    console.info( `startRefreshing()` );
     if (!this.refreshInterval) {
       this.refreshInterval = setInterval(async () => {
         console.info("refreshing...");
-        //const peers = await this.peerCollection.find({});
-        //console.info(peers);
 
+        await this.joinLobby(this.dbName, this.collectionName);
+
+        this.getPeers();
+
+        //TODO: only when head hash is different
         if (this.collection) {
-          const connection = await this.collection.find({});
-          console.info(connection);
+          console.info(this.lobbyId);
+          const res = await this.collection.findOne({_id: this.lobbyId});
+          console.info(res);
+
+          if (res && Object.prototype.hasOwnProperty.call(res, "title")) {
+            this.lobbyData.title = res.title;
+          }
         }
-        else {
-          console.info("this.collection = undefined");
-        }
+
       }, 2000);
     }
   }
@@ -136,25 +199,33 @@ export default class Modal extends Vue {
     await this.ipfs.pubsub.subscribe(multiHash, async (msg: any) => {
       console.info("P2P MESSAGE RECEIVED");
 
-      const lobbyInfo = JSON.parse(msg.data.toString());
+      const lobbyInfo: MasterMessage = JSON.parse(msg.data.toString());
+      this.lobbyInfo = lobbyInfo;
       console.info(lobbyInfo);
+
+      if (Object.prototype.hasOwnProperty.call(lobbyInfo, "lobbyId") && lobbyInfo.lobbyId != this.lobbyId) {
+        this.lobbyId = lobbyInfo.lobbyId;
+      }
 
       if (Object.prototype.hasOwnProperty.call(lobbyInfo, "dbAddr") && Object.prototype.hasOwnProperty.call(lobbyInfo, "collectionName")) {
         if (this.dbName != lobbyInfo.dbAddr || this.collectionName != lobbyInfo.collectionName) {
           //Stop receiving new broadcast messages until we're done with the current one
           await this.stopSubscribe(this.multiHash);
 
-          try {
-            await this.joinLobby(lobbyInfo.dbAddr, lobbyInfo.collectionName);
-          }
-          catch (err) {
-            console.error(err);
-          }
-
           await this.startRefreshing();
 
           await this.startSubscribe(this.multiHash);
         }
+      }
+      if (this.collection && this.peerCollection && Object.prototype.hasOwnProperty.call(lobbyInfo, "headHash") && Object.prototype.hasOwnProperty.call(lobbyInfo, "peersHeadHash")) {
+        var localHeadHash = await this.collection.getHeadHash();
+        var localPeerHeadHash = await this.peerCollection.getHeadHash();
+          if (lobbyInfo.headHash != localHeadHash || lobbyInfo.peersHeadHash != localPeerHeadHash) {
+            this.isLoading = true;
+          }
+          else {
+            this.isLoading = false;
+          }
       }
 
       if (Object.prototype.hasOwnProperty.call(lobbyInfo, "dbAddr")) {
@@ -193,32 +264,197 @@ export default class Modal extends Vue {
 
     const dbName = "com-" + multiHash + "-db";
     const collectionName = "com-" + multiHash + "-collection";
-    const peerCollectionName = this.collectionName + "-peers";
+    const peerCollectionName = collectionName + "-peers";
 
     const aviondb = await this.initAvionDB(dbName);
 
     if (aviondb) {
-      const collection = await this.initAvionCollection(aviondb, collectionName);
-      //const peerCollection = await this.initAvionCollection(aviondb, peerCollectionName);
+      var insertDefaultData = false;
 
-      //this.peerCollection = peerCollection;
+      const collections = await aviondb.listCollections();
+      if (!collections.includes(collectionName)) {
+          insertDefaultData = true;
+      }
+
+      const collection = await this.initAvionCollection(aviondb, collectionName);
+      const peerCollection = await this.initAvionCollection(aviondb, peerCollectionName);
+
+
+      if (!this.hasEvents) {
+        this.addEvents(aviondb, true, false, false);
+        this.addEvents(collection, false, true, false);
+        this.addEvents(peerCollection, false, false, true);
+        this.hasEvents = true;
+      }
+
+      this.peerCollection = peerCollection;
       this.collection = collection;
       this.aviondb = aviondb;
 
-      /*
-      await this.collection.insertOne({
-        multiHash: multiHash,
-      } as Peer);
-      */
+      if (insertDefaultData) {
+        console.info("insertDefaultData")
+        await this.peerCollection.insertOne({
+          multiHash: multiHash,
+        } as Peer);
 
-      console.info("Local copy:");
-      const connection = await this.collection.find({});
-      console.info(connection);
+        await this.collection.insertOne(this.lobbyData);
+        const found = await this.collection.findOne(this.lobbyData);
+
+        console.info(found);
+
+
+        if (found) {
+          this.lobbyId = found._id;
+          
+        }
+        console.info("this.lobbyId");
+        console.info(this.lobbyId);
+
+        this.peers = new Set<string>(this.peers.add(multiHash));
+      }
       
+      this.addListeningEvents();
+
       await this.startPublish(
         this.aviondb.id,
-        this.collection.dbname
+        this.collection.dbname,
+        this.lobbyId,
       );
+
+      this.isLoading = false;
+    }
+  }
+
+
+  addListeningEvents() {
+    this.ipfs.libp2p.on("peer:connect", (ipfsPeer: any) => {
+      console.log("Connected: ", ipfsPeer.id._idB58String);
+    });
+    this.ipfs.libp2p.on("peer:disconnect", async (ipfsPeer: any) => {
+      console.log("Disconnected: ", ipfsPeer.id._idB58String);
+
+      if (this.peers.has(ipfsPeer.id._idB58String)) {
+        console.info("! was a peer");
+        const tmp = this.peers;
+        tmp.delete(ipfsPeer.id._idB58String);
+        this.peers = tmp;
+        console.info(this.peers);
+      }
+
+      const existing = await this.peerCollection.findOne({multiHash: ipfsPeer.id._idB58String});
+      console.info("existing:")
+      console.info(existing);
+      if (existing) {
+        console.info("exists, removing from db");
+        await this.peerCollection.deleteOne({
+          multiHash: ipfsPeer.id._idB58String
+        });
+
+        await this.getPeers();
+      }
+    });
+  }
+
+  addEvents(db: any, isAvionDB: boolean, isCollection: boolean, isPeerCollection: boolean) {
+    console.info("addEvents()");
+    /*
+    Emitted after an entry was added locally to the database. hash is the IPFS hash
+    of the latest state of the database. entry is the added database op.
+    */
+    db.events.on("write", (address, entry, heads) => {
+      console.log("EVENT: WRITE");
+      console.log(address, entry, heads);
+    });
+    /*
+    Emitted before replicating a part of the database with a peer.
+    */
+    db.events.on("replicate", address => {
+      console.log("EVENT: REPLICATE");
+      console.log(address);
+    });
+    /*
+    Emitted while replicating a database. address is id of the database that emitted
+    the event. hash is the multihash of the entry that was just loaded. entry is the
+    database operation entry. progress is the current progress. have is a map of database
+    pieces we have.
+    */
+    db.events.on(
+      "replicate.progress",
+      (address, hash, entry, progress, have) => {
+        console.log("EVENT: REPLICATE:PROCESS");
+        console.log(address, hash, entry, progress, have);
+      }
+    );
+    /* Emitted when the database has synced with another peer. This is usually a good
+      place to re-query the database for updated results, eg. if a value of a key was
+      changed or if there are new events in an event log.
+    */
+    db.events.on("replicated", async address => {
+      console.log("EVENT: REPLICATED");
+      console.log(address);
+    });
+    /*
+    Emitted before loading the database.
+    */
+    db.events.on("load", dbname => {
+      console.log("EVENT: LOAD");
+      console.log(dbname);
+    });
+    /*
+    Emitted while loading the local database, once for each entry. dbname is the name
+    of the database that emitted the event. hash is the multihash of the entry that was
+    just loaded. entry is the database operation entry. progress is a sequential number
+    starting from 0 upon calling load().
+    */
+    db.events.on(
+      "load.progress",
+      (address, hash, entry, progress, total) => {
+        console.log("EVENT: LOAD:PROGRESS");
+        console.log(address, hash, entry, progress, total);
+      }
+    );
+
+    if (this.isLobbyMaster) {
+      db.events.on("peer", async peer => {
+        console.log("EVENT: PEER");
+        console.log(peer);
+
+        if (!this.peers.has(peer) && this.isLobbyMaster) {
+          const existing = await this.peerCollection.findOne({multiHash: peer});
+          if (!existing) {
+            console.info("INSERT PEER");
+            await this.peerCollection.insertOne({
+              multiHash: peer,
+            });
+          }
+
+          console.log("subscribing to peer");
+          const myId = await this.ipfs.id();
+          if (peer !== myId) {
+            console.log(peer);
+            await this.ipfs.pubsub.subscribe(peer, async (msg: any) => {
+              console.log("MESSAGE FROM PEER RECIEVED");
+            });
+          }
+
+        }
+
+        this.getPeers();
+      });
+    }
+
+  }
+
+  async getPeers() {
+    console.info( `getPeers()` );
+    if (this.peerCollection) {
+      var peers = await this.peerCollection.find({});
+      console.info(peers);
+
+      const tmpArr: Array<string> = peers.map(peer => {
+        return peer.multiHash;
+      });
+      this.peers = new Set<string>(tmpArr);
     }
   }
 
@@ -228,25 +464,47 @@ export default class Modal extends Vue {
     const peerCollectionName = collectionName + "-peers";
 
     if (!this.aviondb) {
-      const aviondb = await this.openAvionDB(dbAddr);
-      this.aviondb = aviondb;
+      try {
+        const aviondb = await this.openAvionDB(dbAddr);
+        this.aviondb = aviondb;
+      }
+      catch(err) {
+        console.error(err);
+      }
     }
 
     if (this.aviondb) {
+
       console.info("got aviodb");
       console.info(this.aviondb);
 
-      //const collections = await this.aviondb.listCollections();
-      
       if(!this.collection) {
-          this.collection = await this.openAvionCollection(this.aviondb, collectionName);
+          try {
+            this.collection = await this.openAvionCollection(this.aviondb, collectionName);
+          }
+          catch(err) {
+            console.error(err);
+          }
+      }
+
+      if(!this.peerCollection) {
+        try {
+          this.peerCollection = await this.openAvionCollection(this.aviondb, peerCollectionName);
+        }
+        catch(err) {
+          console.error(err);
+        }
       }
       
-      /*
-      if(!this.peerCollection) {
-          this.peerCollection = await this.initAvionCollection(this.aviondb, peerCollectionName);
+
+      if (!this.hasEvents && this.aviondb && this.collection && this.peerCollection) {
+          this.addEvents(this.aviondb, true, false, false);
+          this.addEvents(this.collection, false, true, false);
+          this.addEvents(this.peerCollection, false, false, true);
+          this.hasEvents = true;
       }
-      */
+      
+
     }
   }
 
@@ -258,7 +516,7 @@ export default class Modal extends Vue {
 
   async openAvionCollection(aviondb: any, collectionName: string): Promise<any> {
     console.info( `openAvionCollection( aviondb, ${collectionName})` );
-    const collection = await aviondb.initCollection(collectionName); //NOTE: Init rather than open
+    const collection = await aviondb.openCollection(collectionName); //NOTE: Init rather than open
     return collection;
   }
 
@@ -304,19 +562,27 @@ export default class Modal extends Vue {
 </script>
 
 <style scoped>
-h3 {
-  margin: 40px 0 0;
+div.Lobby {
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(#2f83df, #2fa7df);
 }
-ul {
-  list-style-type: none;
-  padding: 0;
+
+ion-list {
+  border-radius: 0.2em;
 }
-li {
-  display: inline-block;
-  margin: 0 10px;
+
+ion-item.Peer {
+  margin-left: 0;
 }
-a {
-  color: #42b983;
+
+div.ProgressBarContainer {
+  min-height: 0.2em;
+  background:#2f83df;
+}
+
+div.Space {
+  min-width: 1em;
 }
 
 ion-content.CustomContent {
